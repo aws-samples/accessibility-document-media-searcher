@@ -1,0 +1,210 @@
+{
+  "Comment": "Accessibility Document Media Searcher State Machine",
+  "StartAt": "Document or Media?",
+  "States": {
+    "Document or Media?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.detail.object.key",
+          "StringMatches": "*.mp4",
+          "Next": "StartTranscriptionJob"
+        },
+        {
+          "Variable": "$.detail.object.key",
+          "StringMatches": "*.pdf",
+          "Next": "StartDocumentTextDetection"
+        }
+      ],
+      "Comment": "Choice state, to check if the S3 file is a document or a media file"
+    },
+    "StartTranscriptionJob": {
+      "Type": "Task",
+      "Parameters": {
+        "Media": {
+          "MediaFileUri.$": "States.Format('s3://{}/{}', $.detail.bucket.name, $.detail.object.key)"
+        },
+        "TranscriptionJobName.$": "States.Format('{}-{}',States.ArrayGetItem(States.StringSplit($.detail.object.key, '/'),1),States.UUID())",
+        "OutputBucketName": "${OUTPUT_BUCKET}",
+        "OutputKey.$": "States.Format('media/transcribe/{}.txt', States.ArrayGetItem(States.StringSplit($.detail.object.key, '/'),1))",
+        "IdentifyLanguage": true
+      },
+      "Resource": "arn:aws:states:::aws-sdk:transcribe:startTranscriptionJob",
+      "Next": "Wait for Transcription"
+    },
+    "Wait for Transcription": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "GetTranscriptionJob"
+    },
+    "GetTranscriptionJob": {
+      "Type": "Task",
+      "Parameters": {
+        "TranscriptionJobName.$": "$.TranscriptionJob.TranscriptionJobName"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:transcribe:getTranscriptionJob",
+      "Next": "Transcribe completed ?"
+    },
+    "Transcribe completed ?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.TranscriptionJob.TranscriptionJobStatus",
+          "StringEquals": "COMPLETED",
+          "Next": "Index Media"
+        },
+        {
+          "Not": {
+            "Variable": "$.TranscriptionJob.TranscriptionJobStatus",
+            "StringEquals": "COMPLETED"
+          },
+          "Next": "Wait for Transcription"
+        }
+      ]
+    },
+    "Index Media": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "OutputPath": "$.Payload",
+      "Parameters": {
+        "Payload.$": "$",
+        "FunctionName": "${LAMBDA_INDEX_MEDIA_ARN}:$LATEST"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 6,
+          "BackoffRate": 2
+        }
+      ],
+      "End": true
+    },
+    "StartDocumentTextDetection": {
+      "Type": "Task",
+      "Next": "Wait for Textract",
+      "Parameters": {
+        "DocumentLocation": {
+          "S3Object": {
+            "Bucket.$": "$.detail.bucket.name",
+            "Name.$": "$.detail.object.key"
+          }
+        }
+      },
+      "Resource": "arn:aws:states:::aws-sdk:textract:startDocumentTextDetection",
+      "ResultPath": "$.TextractJob"
+    },
+    "Wait for Textract": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "GetDocumentTextDetection",
+      "Comment": "Wait for Textract finish TextDetection job"
+    },
+    "GetDocumentTextDetection": {
+      "Type": "Task",
+      "Parameters": {
+        "JobId.$": "$.TextractJob.JobId",
+        "MaxResults": 1
+      },
+      "Resource": "arn:aws:states:::aws-sdk:textract:getDocumentTextDetection",
+      "Next": "Textract succeeded ?",
+      "ResultPath": "$.Result"
+    },
+    "Textract succeeded ?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.Result.JobStatus",
+          "StringEquals": "SUCCEEDED",
+          "Next": "Lambda Invoke Text Format&Polly"
+        },
+        {
+          "Not": {
+            "Variable": "$.Result.JobStatus",
+            "StringEquals": "SUCCEEDED"
+          },
+          "Next": "Wait for Textract"
+        }
+      ]
+    },
+    "Lambda Invoke Text Format&Polly": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "OutputPath": "$.Payload",
+      "Parameters": {
+        "FunctionName": "${LAMBDA_FORMAT_TEXTRACT_ARN}:$LATEST",
+        "Payload.$": "$"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 6,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "Wait for Polly"
+    },
+    "Wait for Polly": {
+      "Type": "Wait",
+      "Seconds": 15,
+      "Next": "GetSpeechSynthesisTask"
+    },
+    "GetSpeechSynthesisTask": {
+      "Type": "Task",
+      "Parameters": {
+        "TaskId.$": "$.pollyJobId"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:polly:getSpeechSynthesisTask",
+      "ResultPath": "$.Result",
+      "Next": "Polly Completed?"
+    },
+    "Polly Completed?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.Result.SynthesisTask.TaskStatus",
+          "StringEquals": "completed",
+          "Next": "Index Document"
+        },
+        {
+          "Not": {
+            "Variable": "$.Result.SynthesisTask.TaskStatus",
+            "StringEquals": "completed"
+          },
+          "Next": "Wait for Polly"
+        }
+      ]
+    },
+    "Index Document": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "OutputPath": "$.Payload",
+      "Parameters": {
+        "Payload.$": "$",
+        "FunctionName": "${LAMBDA_INDEX_DOC_ARN}:$LATEST"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 6,
+          "BackoffRate": 2
+        }
+      ],
+      "End": true
+    }
+  }
+}
