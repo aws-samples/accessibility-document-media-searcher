@@ -29,7 +29,7 @@ export VOICE_ID="Vitoria"
 Clone this repo: 
 
 ```sh
-git clone https://<<repo>>/accessibility-document-media-searcher.git 
+git clone https://github.com/aws-samples/accessibility-document-media-searcher.git
 ```
 
 Download the requirements: 
