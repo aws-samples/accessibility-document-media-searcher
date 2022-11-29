@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>Upload file to S3</title>
+  <script src="https://sdk.amazonaws.com/js/aws-sdk-2.357.0.min.js"></script>
+  <script src="https://unpkg.com/vue@1.0.28/dist/vue.js"></script>
+  <script src="https://unpkg.com/axios@0.2.1/dist/axios.min.js"></script>
+  <script type="text/javascript" src="https://code.jquery.com/jquery-3.2.1.min.js"></script>
+  <link rel="stylesheet" href="css/main.css">
+</head>
+
+<body>
+  <div class="topnav">
+    <a href="./index.html">Search</a>
+    <a class="active" href="./upload.html">Upload</a>
+    <a id="logout" href="./login.html" onclick="logout()">Logout</a>
+  </div>
+  <!-- A functional html code-->
+  <div>
+    <input type="file" id="fileUpload">
+  </div>
+
+  <div>
+    <button id=enviarArq onclick="s3upload()">Upload</button>
+  </div>
+
+  <progress id="progressBar" max=”100” value=”0” style="
+  margin-left: 20%;
+  width: 60%;"></progress>
+  <script src="scripts/logout.js"></script>
+  <script src="scripts/config.js"></script>
+  <script src="scripts/upload.js"></script>
+</body>
+
+</html>

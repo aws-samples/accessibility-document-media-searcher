@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="css/main.css">
+    <title>Login</title>
+</head>
+
+<body>
+    <form>
+        <h1 id="login_tittle">Login</h1>
+        <input id="inputUsername" type="text" placeholder="Username" name="username" required autofocus>
+        <input id="inputPassword" type="password" placeholder="Password" name="password" required>
+        <button id=login type="button" onclick="signInButton()">Login</button>
+    </form>
+    <script src="https://code.jquery.com/jquery-1.11.3.min.js"></script>
+    <script src="scripts/amazon-cognito-identity.min.js"></script>
+    <script src="https://sdk.amazonaws.com/js/aws-sdk-2.357.0.min.js"></script>
+    <script src="scripts/config.js"></script>
+    <script src="scripts/login.js"></script>
+</body>
+</html>
