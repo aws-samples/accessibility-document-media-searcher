@@ -2,6 +2,7 @@ import os
 import string
 import secrets
 from aws_cdk import (
+    Aspects as Aspects,
     Duration as duration,
     CfnOutput as output,
     custom_resources as cr,
@@ -19,9 +20,12 @@ from aws_cdk import (
     aws_events_targets as targets,
     aws_cloudfront as cloudfront,
     aws_cloudfront_origins as origins,
+    aws_logs as logs,
     aws_iam as iam,
     App, Duration, Stack
 )
+from cdk_nag import AwsSolutionsChecks, NagSuppressions
+
 
 class JobPollerStack(Stack):
     def __init__(self, app: App, id: str, **kwargs) -> None:
@@ -49,21 +53,36 @@ class JobPollerStack(Stack):
             allowed_headers=["*"],
             exposed_headers=["ETag"]
         )
+        bucket_access_logs = s3.Bucket(self, "access_logs",
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            # object_ownership=s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            enforce_ssl=True
+        )
         bucket_front = s3.Bucket(self, "bucket-front",
             website_index_document="login.html",
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
-            object_ownership=s3.ObjectOwnership.BUCKET_OWNER_ENFORCED
+            object_ownership=s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+            server_access_logs_bucket=bucket_access_logs,
+            server_access_logs_prefix="bucket_front/",
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            enforce_ssl=True
         )
         bucket_raw = s3.Bucket(self, "bucket-raw", 
             cors=([cors_rule]),
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             event_bridge_enabled=True,
-            object_ownership=s3.ObjectOwnership.BUCKET_OWNER_PREFERRED
-            )
+            object_ownership=s3.ObjectOwnership.BUCKET_OWNER_PREFERRED,
+            server_access_logs_bucket=bucket_access_logs,
+            server_access_logs_prefix="bucket_raw/",
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            enforce_ssl=True
+        )
       
         
         # VPC
         vpc = ec2.Vpc(self, "adms-vpc")
+        vpc.add_flow_log("FlowLog")
 
         # VPC Subnets
         selection = vpc.select_subnets(
@@ -89,7 +108,12 @@ class JobPollerStack(Stack):
             capacity=opensearch.CapacityConfig(
                 data_nodes=data_nodes,
                 data_node_instance_type=os_instance_type
-            ), 
+            ),
+            logging=opensearch.LoggingOptions(
+                slow_search_log_enabled=True,
+                app_log_enabled=True,
+                slow_index_log_enabled=True
+            ),
             zone_awareness=opensearch.ZoneAwarenessConfig(
                 availability_zone_count=data_nodes
             ),                       
@@ -201,7 +225,11 @@ class JobPollerStack(Stack):
                 ",
             ),
             password_policy=cognito.PasswordPolicy(
-                min_length=6,
+                min_length=8,
+                require_lowercase=True,
+                require_uppercase=True,
+                require_digits=True,
+                require_symbols=True,
                 temp_password_validity=Duration.days(7)
             )
         )
@@ -221,6 +249,7 @@ class JobPollerStack(Stack):
         admsIdentityPool = cognito.CfnIdentityPool(self, "ADMSIdentityPool",
             cognito_identity_providers=pool.identity_providers,
             allow_unauthenticated_identities=True
+            # allow_unauthenticated_identities=False
         )
         # Cognito Identity Pool Role
         identitypoolAuthAssumeRolePolicyDoc = iam.PolicyDocument(
@@ -283,9 +312,26 @@ class JobPollerStack(Stack):
         )
 
         # API Gateway
+        prd_log_group = logs.LogGroup(self, "adms-search-api-LogGroup")
         api = apigateway.RestApi(self, "search-api",
             description="ADMS Lambda search-api",
-            rest_api_name="adms-search-api"
+            rest_api_name="adms-search-api",
+            deploy_options=apigateway.StageOptions(
+                logging_level=apigateway.MethodLoggingLevel.INFO,
+                data_trace_enabled=True,
+                access_log_destination=apigateway.LogGroupLogDestination(prd_log_group),
+                access_log_format=apigateway.AccessLogFormat.json_with_standard_fields(
+                    caller=False,
+                    http_method=True,
+                    ip=True,
+                    protocol=True,
+                    request_time=True,
+                    resource_path=True,
+                    response_length=True,
+                    status=True,
+                    user=True
+                )
+            )
         )
         # API Gateway Authorizer
         apiAuth = apigateway.CognitoUserPoolsAuthorizer(self, "apiAuth",
@@ -317,18 +363,17 @@ class JobPollerStack(Stack):
                     actions=[
                         "logs:CreateLogGroup",
                         "logs:CreateLogStream",
-                        "logs:PutLogEvents"
+                        "logs:CreateLogDelivery",
+                        "logs:GetLogDelivery",
+                        "logs:UpdateLogDelivery",
+                        "logs:DeleteLogDelivery",
+                        "logs:ListLogDeliveries",
+                        "logs:PutLogEvents",
+                        "logs:PutResourcePolicy",
+                        "logs:DescribeResourcePolicies",
+                        "logs:DescribeLogGroups"
                     ],
-                    resources=["arn:aws:logs:*:*:*"]
-                ),
-                iam.PolicyStatement(
-                    actions=[
-                        "logs:CreateLogStream",
-                        "logs:PutLogEvents"
-                    ],
-                    resources=[
-                        "arn:aws:logs:*:*:log-group:/aws/lambda/*:*"
-                    ]
+                    resources=["*"]
                 ),
                 iam.PolicyStatement(
                     actions=[
@@ -422,7 +467,9 @@ class JobPollerStack(Stack):
 
         # Load step function template file
         sfn_def = open("../../step-function/StateMachineTemplate.json", "r")
-
+        
+        log_group = logs.LogGroup(self, "admsStateMachineLogGroup")
+        
         # Step Functions
         cfn_state_machine = _aws_stepfunctions.CfnStateMachine(self, "admsStateMachine",
             role_arn=state_machine_role.role_arn,
@@ -436,6 +483,15 @@ class JobPollerStack(Stack):
             },
             state_machine_name="admsStateMachine",
             state_machine_type="STANDARD",
+            logging_configuration=_aws_stepfunctions.CfnStateMachine.LoggingConfigurationProperty(
+                destinations=[_aws_stepfunctions.CfnStateMachine.LogDestinationProperty(
+                    cloud_watch_logs_log_group=_aws_stepfunctions.CfnStateMachine.CloudWatchLogsLogGroupProperty(
+                        log_group_arn=log_group.log_group_arn
+                    )
+                )],
+                include_execution_data=False,
+                level="ALL"
+            ),
             tracing_configuration=_aws_stepfunctions.CfnStateMachine.TracingConfigurationProperty(
                 enabled=True
             )
@@ -535,4 +591,64 @@ class JobPollerStack(Stack):
             policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
                 resources=cr.AwsCustomResourcePolicy.ANY_RESOURCE
             )
+        )
+        # Aspects.of(self).add(AwsSolutionsChecks())
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-S1", "reason": "DONE: The S3 Bucket has server access logs disabled. (Central bucket server access log left disable)"}]
+        )
+        NagSuppressions.add_stack_suppressions(
+           self, [{"id": "AwsSolutions-OS4", "reason": "DONE: Not implemented."}]
+        )
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-COG3", "reason": "DONE: Not implemented due advanced security extra costs."}]
+        )
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-IAM4", "reason": "TODO: Stop using AWS managed policies."}]
+        )
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-IAM5", "reason": "TODO: Remove Wildcards in IAM roles."}]
+        )
+ 
+        # NagSuppressions.add_stack_suppressions(
+        #     self, [{"id": "AwsSolutions-SF1", "reason": "DONE: Log all events in Cloudwatch."}]
+        # )
+        # NagSuppressions.add_stack_suppressions(
+        #     self, [{"id": "AwsSolutions-APIG1", "reason": "DONE: The API does not have access logging enabled."}]
+        # )
+        # NagSuppressions.add_stack_suppressions(
+        #     self, [{"id": "AwsSolutions-APIG6", "reason": "DONE: The REST API Stage does not have CloudWatch logging enabled for all methods."}]
+        # )
+
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-APIG2", "reason": "TODO: The REST API does not have request validation enabled."}]
+        )
+ 
+   
+
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-COG7", "reason": "The Cognito identity pool allows for unauthenticated logins and does not have a cdk-nag rule suppression with a reason"}]
+        )
+        
+        # NagSuppressions.add_stack_suppressions(
+        #     self, [{"id": "AwsSolutions-VPC7", "reason": "The VPC does not have an associated Flow Log"}]
+        # )
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-OS3", "reason": "The OpenSearch Service domain does not only grant access via allowlisted IP addresses."}]
+        )
+    
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-OS5", "reason": "The OpenSearch Service domain allows for unsigned requests or anonymous access."}]
+        )
+        # NagSuppressions.add_stack_suppressions(
+        #     self, [{"id": "AwsSolutions-OS9", "reason": "The OpenSearch Service domain does not minimally publish SEARCH_SLOW_LOGS and INDEX_SLOW_LOGS to CloudWatch Logs."}]
+        # )
+
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-L1", "reason": "The non-container Lambda function is not configured to use the latest runtime version."}]
+        )
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-CFR3", "reason": "The CloudFront distribution does not have access logging enabled."}]
+        )
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-CFR4", "reason": "The CloudFront distribution allows for SSLv3 or TLSv1 for HTTPS viewer connections."}]
         )

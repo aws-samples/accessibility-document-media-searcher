@@ -27,7 +27,10 @@ async function search() {
       url: apigatewayendpoint,
       data: { q: query, size: 25},
       headers: {
-        'Authorization':authToken
+        'Authorization':authToken,
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
       },
       dataType: 'json'
     });
