@@ -339,22 +339,54 @@ class JobPollerStack(Stack):
         )
         # API Gateway Method
         resource = api.root.add_resource("search")
-        api.root.add_method("GET", apigateway.LambdaIntegration(search_api, proxy=True),
+        api.root.add_method("GET", apigateway.LambdaIntegration(
+            search_api, 
+            proxy=True,
+            integration_responses=[apigateway.IntegrationResponse(
+                    # Successful response from the Lambda function, no filter defined
+                    #  - the selectionPattern filter only tests the error message
+                    # We will set the response status code to 200
+                    status_code="200",
+                    response_parameters={
+                        # We can map response parameters
+                        # - Destination parameters (the key) are the response parameters (used in mappings)
+                        # - Source parameters (the value) are the integration response parameters or expressions
+                        "method.response.header.Content-Type": "'application/json'",
+                        "method.response.header.Access-Control-Allow-Origin": "'*'",
+                        "method.response.header.Access-Control-Allow-Credentials": "'true'"
+                    }
+                )]
+            ),
             request_parameters={"method.request.querystring.q":True},
             authorizer=apiAuth,
             authorization_type=apigateway.AuthorizationType.COGNITO,
             authorization_scopes=["email", "aws.cognito.signin.user.admin"],
             method_responses=[apigateway.MethodResponse(
                 status_code="200",
-
-                # the properties below are optional
-                response_models={
-                    "application/json": apigateway.Model.EMPTY_MODEL
-                },
+                # response_models={
+                #     "application/json": apigateway.Model.EMPTY_MODEL
+                # },
                 response_parameters={
-                    "method.response.header.Access-Control-Allow-Origin": True
+                    "method.response.header.Content-Type": True,
+                    "method.response.header.Access-Control-Allow-Origin": True,
+                    "method.response.header.Access-Control-Allow-Credentials": True
                 }
-            )]
+            ),apigateway.MethodResponse(
+                status_code="400",
+                response_parameters={
+                    "method.response.header.Content-Type": True,
+                    "method.response.header.Access-Control-Allow-Origin": True,
+                    "method.response.header.Access-Control-Allow-Credentials": True
+                }
+                # response_models={
+                #     "application/json": apigateway.Model.EMPTY_MODEL
+                # }
+            )
+            ]
+        )
+        resource.add_cors_preflight(
+            allow_origins=["*"],
+            allow_methods=["GET", "PUT"]
         )
         # IAM Policy Document
         adms_policyDoc = iam.PolicyDocument(
