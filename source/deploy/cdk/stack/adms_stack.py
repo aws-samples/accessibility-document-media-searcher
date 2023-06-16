@@ -98,6 +98,21 @@ class JobPollerStack(Stack):
         iam.CfnServiceLinkedRole(self, "OpensearchSLR",
             aws_service_name="opensearchservice.amazonaws.com"
         )
+        # Domain Access Policy
+        domainStatement = iam.PolicyStatement(
+                            actions=[
+                                "es:ESHttp*"
+                            ],
+                            resources= [
+                                "arn:aws:es:"+self.region+":"+self.account+":domain/ADMSDomain/*"
+                            ],
+                            conditions= {
+                                "IpAddress": {
+                                    "aws:SourceIp": [vpc.DEFAULT_CIDR_RANGE]
+                                }
+                            }
+                        )
+                        
         # Opensearch
         domain = opensearch.Domain(self, "ADMSDomain",
             version=opensearch.EngineVersion.OPENSEARCH_1_3,
@@ -125,13 +140,14 @@ class JobPollerStack(Stack):
             security_groups=[security_group],
             encryption_at_rest=opensearch.EncryptionAtRestOptions(
                 enabled=True
-            )
+            ),
+            access_policies=[domainStatement]
         )        
 
         # Lambda Functions
         format_textract = _lambda.Function(self, 'format_textract', 
                                         handler='formatTextract.lambda_handler',
-                                        runtime=_lambda.Runtime.PYTHON_3_8,
+                                        runtime=_lambda.Runtime.PYTHON_3_9,
                                         timeout= duration.seconds(300),
                                         code=_lambda.Code.from_asset('../../lambda',exclude=['searchApi.py','indexDoc.py','indexMedia.py']))
         format_textract.add_environment("S3_BUCKET_OUTPUT", bucket_front.bucket_name)
@@ -142,7 +158,7 @@ class JobPollerStack(Stack):
 
         index_doc = _lambda.Function(self, 'index_doc', 
                                         handler='indexDoc.lambda_handler',
-                                        runtime=_lambda.Runtime.PYTHON_3_8,
+                                        runtime=_lambda.Runtime.PYTHON_3_9,
                                         timeout= duration.seconds(300),
                                         vpc=vpc,
                                         vpc_subnets=ec2.SubnetSelection(
@@ -157,7 +173,7 @@ class JobPollerStack(Stack):
         index_doc.add_environment("INDEX_NAME", index_name)        
         index_media = _lambda.Function(self, 'index_media', 
                                         handler='indexMedia.lambda_handler',
-                                        runtime=_lambda.Runtime.PYTHON_3_8,
+                                        runtime=_lambda.Runtime.PYTHON_3_9,
                                         timeout= duration.seconds(300),
                                         vpc=vpc,
                                         vpc_subnets=ec2.SubnetSelection(
@@ -172,7 +188,7 @@ class JobPollerStack(Stack):
         index_media.add_environment("INDEX_NAME", index_name)
         search_api = _lambda.Function(self, 'search_api', 
                                         handler='searchApi.lambda_handler',
-                                        runtime=_lambda.Runtime.PYTHON_3_8,
+                                        runtime=_lambda.Runtime.PYTHON_3_9,
                                         timeout= duration.seconds(300),
                                         vpc=vpc,
                                         vpc_subnets=ec2.SubnetSelection(
@@ -198,8 +214,15 @@ class JobPollerStack(Stack):
                     origin_access_identity=origin_access_identity
                 ),
                 behaviors=[cloudfront.Behavior(is_default_behavior=True)]
+            )],
+            logging_config = cloudfront.LoggingConfiguration(
+                bucket=bucket_access_logs,
+                include_cookies=False,
+                prefix="cloudfront"
+            ),
+            viewer_certificate=cloudfront.ViewerCertificate.from_iam_certificate("certificateId",
+                security_policy=cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,  # default
             )
-            ]
         )
   
         output(self, "WebSiteDistributionOut", value="https://"+adms_dist.distribution_domain_name+"/login.html")
@@ -248,8 +271,8 @@ class JobPollerStack(Stack):
         # Cognito Identity Pool      
         admsIdentityPool = cognito.CfnIdentityPool(self, "ADMSIdentityPool",
             cognito_identity_providers=pool.identity_providers,
-            allow_unauthenticated_identities=True
-            # allow_unauthenticated_identities=False
+            # allow_unauthenticated_identities=True
+            allow_unauthenticated_identities=False
         )
         # Cognito Identity Pool Role
         identitypoolAuthAssumeRolePolicyDoc = iam.PolicyDocument(
@@ -624,7 +647,7 @@ class JobPollerStack(Stack):
                 resources=cr.AwsCustomResourcePolicy.ANY_RESOURCE
             )
         )
-        # Aspects.of(self).add(AwsSolutionsChecks())
+        Aspects.of(self).add(AwsSolutionsChecks())
         NagSuppressions.add_stack_suppressions(
             self, [{"id": "AwsSolutions-S1", "reason": "DONE: The S3 Bucket has server access logs disabled. (Central bucket server access log left disable)"}]
         )
@@ -635,52 +658,32 @@ class JobPollerStack(Stack):
             self, [{"id": "AwsSolutions-COG3", "reason": "DONE: Not implemented due advanced security extra costs."}]
         )
         NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-APIG4", "reason": "DONE: Added API authorization via CDK add_resource."}]
+        )
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-COG4", "reason": "DONE: Added in apiAuth = apigateway.CognitoUserPoolsAuthorizer."}]
+        )
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-L1", "reason": "DONE: CDK uses an older version of Node for custom resource provider."}]
+        )
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-APIG2", "reason": "DONE: Not implemented."}]
+        )
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-OS3", "reason": "Fix not available in L2 Construct when using VPC-bound cluster.'"}]
+        )
+        
+    
+        # NagSuppressions.add_stack_suppressions(
+        #     self, [{"id": "AwsSolutions-OS5", "reason": "The OpenSearch Service domain allows for unsigned requests or anonymous access."}]
+        # )
+  
+
+
+
+        NagSuppressions.add_stack_suppressions(
             self, [{"id": "AwsSolutions-IAM4", "reason": "TODO: Stop using AWS managed policies."}]
         )
         NagSuppressions.add_stack_suppressions(
             self, [{"id": "AwsSolutions-IAM5", "reason": "TODO: Remove Wildcards in IAM roles."}]
-        )
- 
-        # NagSuppressions.add_stack_suppressions(
-        #     self, [{"id": "AwsSolutions-SF1", "reason": "DONE: Log all events in Cloudwatch."}]
-        # )
-        # NagSuppressions.add_stack_suppressions(
-        #     self, [{"id": "AwsSolutions-APIG1", "reason": "DONE: The API does not have access logging enabled."}]
-        # )
-        # NagSuppressions.add_stack_suppressions(
-        #     self, [{"id": "AwsSolutions-APIG6", "reason": "DONE: The REST API Stage does not have CloudWatch logging enabled for all methods."}]
-        # )
-
-        NagSuppressions.add_stack_suppressions(
-            self, [{"id": "AwsSolutions-APIG2", "reason": "TODO: The REST API does not have request validation enabled."}]
-        )
- 
-   
-
-        NagSuppressions.add_stack_suppressions(
-            self, [{"id": "AwsSolutions-COG7", "reason": "The Cognito identity pool allows for unauthenticated logins and does not have a cdk-nag rule suppression with a reason"}]
-        )
-        
-        # NagSuppressions.add_stack_suppressions(
-        #     self, [{"id": "AwsSolutions-VPC7", "reason": "The VPC does not have an associated Flow Log"}]
-        # )
-        NagSuppressions.add_stack_suppressions(
-            self, [{"id": "AwsSolutions-OS3", "reason": "The OpenSearch Service domain does not only grant access via allowlisted IP addresses."}]
-        )
-    
-        NagSuppressions.add_stack_suppressions(
-            self, [{"id": "AwsSolutions-OS5", "reason": "The OpenSearch Service domain allows for unsigned requests or anonymous access."}]
-        )
-        # NagSuppressions.add_stack_suppressions(
-        #     self, [{"id": "AwsSolutions-OS9", "reason": "The OpenSearch Service domain does not minimally publish SEARCH_SLOW_LOGS and INDEX_SLOW_LOGS to CloudWatch Logs."}]
-        # )
-
-        NagSuppressions.add_stack_suppressions(
-            self, [{"id": "AwsSolutions-L1", "reason": "The non-container Lambda function is not configured to use the latest runtime version."}]
-        )
-        NagSuppressions.add_stack_suppressions(
-            self, [{"id": "AwsSolutions-CFR3", "reason": "The CloudFront distribution does not have access logging enabled."}]
-        )
-        NagSuppressions.add_stack_suppressions(
-            self, [{"id": "AwsSolutions-CFR4", "reason": "The CloudFront distribution allows for SSLv3 or TLSv1 for HTTPS viewer connections."}]
         )
