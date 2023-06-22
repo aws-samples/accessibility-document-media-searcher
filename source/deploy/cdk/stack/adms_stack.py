@@ -2,6 +2,7 @@ import os
 import string
 import secrets
 from aws_cdk import (
+    Aspects as Aspects,
     Duration as duration,
     CfnOutput as output,
     custom_resources as cr,
@@ -19,9 +20,12 @@ from aws_cdk import (
     aws_events_targets as targets,
     aws_cloudfront as cloudfront,
     aws_cloudfront_origins as origins,
+    aws_logs as logs,
     aws_iam as iam,
     App, Duration, Stack
 )
+from cdk_nag import AwsSolutionsChecks, NagSuppressions
+
 
 class JobPollerStack(Stack):
     def __init__(self, app: App, id: str, **kwargs) -> None:
@@ -49,21 +53,36 @@ class JobPollerStack(Stack):
             allowed_headers=["*"],
             exposed_headers=["ETag"]
         )
+        bucket_access_logs = s3.Bucket(self, "access_logs",
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            # object_ownership=s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            enforce_ssl=True
+        )
         bucket_front = s3.Bucket(self, "bucket-front",
             website_index_document="login.html",
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
-            object_ownership=s3.ObjectOwnership.BUCKET_OWNER_ENFORCED
+            object_ownership=s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+            server_access_logs_bucket=bucket_access_logs,
+            server_access_logs_prefix="bucket_front/",
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            enforce_ssl=True
         )
         bucket_raw = s3.Bucket(self, "bucket-raw", 
             cors=([cors_rule]),
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             event_bridge_enabled=True,
-            object_ownership=s3.ObjectOwnership.BUCKET_OWNER_PREFERRED
-            )
+            object_ownership=s3.ObjectOwnership.BUCKET_OWNER_PREFERRED,
+            server_access_logs_bucket=bucket_access_logs,
+            server_access_logs_prefix="bucket_raw/",
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            enforce_ssl=True
+        )
       
         
         # VPC
         vpc = ec2.Vpc(self, "adms-vpc")
+        vpc.add_flow_log("FlowLog")
 
         # VPC Subnets
         selection = vpc.select_subnets(
@@ -79,6 +98,26 @@ class JobPollerStack(Stack):
         iam.CfnServiceLinkedRole(self, "OpensearchSLR",
             aws_service_name="opensearchservice.amazonaws.com"
         )
+        # Domain Access Policy
+        domainStatement = iam.PolicyStatement(
+                            actions=[
+                                "es:ESHttpGet",
+                                "es:ESHttpHead",
+                                "es:ESHttpPut",
+                                "es:ESHttpDelete",
+                                "es:ESHttpPost",
+                                "es:ESHttpPatch"
+                            ],
+                            resources= [
+                                "arn:aws:es:"+self.region+":"+self.account+":domain/ADMSDomain/*"
+                            ],
+                            conditions= {
+                                "IpAddress": {
+                                    "aws:SourceIp": [vpc.DEFAULT_CIDR_RANGE]
+                                }
+                            }
+                        )
+                        
         # Opensearch
         domain = opensearch.Domain(self, "ADMSDomain",
             version=opensearch.EngineVersion.OPENSEARCH_1_3,
@@ -89,7 +128,12 @@ class JobPollerStack(Stack):
             capacity=opensearch.CapacityConfig(
                 data_nodes=data_nodes,
                 data_node_instance_type=os_instance_type
-            ), 
+            ),
+            logging=opensearch.LoggingOptions(
+                slow_search_log_enabled=True,
+                app_log_enabled=True,
+                slow_index_log_enabled=True
+            ),
             zone_awareness=opensearch.ZoneAwarenessConfig(
                 availability_zone_count=data_nodes
             ),                       
@@ -101,13 +145,14 @@ class JobPollerStack(Stack):
             security_groups=[security_group],
             encryption_at_rest=opensearch.EncryptionAtRestOptions(
                 enabled=True
-            )
+            ),
+            access_policies=[domainStatement]
         )        
 
         # Lambda Functions
         format_textract = _lambda.Function(self, 'format_textract', 
                                         handler='formatTextract.lambda_handler',
-                                        runtime=_lambda.Runtime.PYTHON_3_8,
+                                        runtime=_lambda.Runtime.PYTHON_3_9,
                                         timeout= duration.seconds(300),
                                         code=_lambda.Code.from_asset('../../lambda',exclude=['searchApi.py','indexDoc.py','indexMedia.py']))
         format_textract.add_environment("S3_BUCKET_OUTPUT", bucket_front.bucket_name)
@@ -118,7 +163,7 @@ class JobPollerStack(Stack):
 
         index_doc = _lambda.Function(self, 'index_doc', 
                                         handler='indexDoc.lambda_handler',
-                                        runtime=_lambda.Runtime.PYTHON_3_8,
+                                        runtime=_lambda.Runtime.PYTHON_3_9,
                                         timeout= duration.seconds(300),
                                         vpc=vpc,
                                         vpc_subnets=ec2.SubnetSelection(
@@ -133,7 +178,7 @@ class JobPollerStack(Stack):
         index_doc.add_environment("INDEX_NAME", index_name)        
         index_media = _lambda.Function(self, 'index_media', 
                                         handler='indexMedia.lambda_handler',
-                                        runtime=_lambda.Runtime.PYTHON_3_8,
+                                        runtime=_lambda.Runtime.PYTHON_3_9,
                                         timeout= duration.seconds(300),
                                         vpc=vpc,
                                         vpc_subnets=ec2.SubnetSelection(
@@ -148,7 +193,7 @@ class JobPollerStack(Stack):
         index_media.add_environment("INDEX_NAME", index_name)
         search_api = _lambda.Function(self, 'search_api', 
                                         handler='searchApi.lambda_handler',
-                                        runtime=_lambda.Runtime.PYTHON_3_8,
+                                        runtime=_lambda.Runtime.PYTHON_3_9,
                                         timeout= duration.seconds(300),
                                         vpc=vpc,
                                         vpc_subnets=ec2.SubnetSelection(
@@ -174,8 +219,15 @@ class JobPollerStack(Stack):
                     origin_access_identity=origin_access_identity
                 ),
                 behaviors=[cloudfront.Behavior(is_default_behavior=True)]
+            )],
+            logging_config = cloudfront.LoggingConfiguration(
+                bucket=bucket_access_logs,
+                include_cookies=False,
+                prefix="cloudfront"
+            ),
+            viewer_certificate=cloudfront.ViewerCertificate.from_iam_certificate("certificateId",
+                security_policy=cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,  # default
             )
-            ]
         )
   
         output(self, "WebSiteDistributionOut", value="https://"+adms_dist.distribution_domain_name+"/login.html")
@@ -201,7 +253,11 @@ class JobPollerStack(Stack):
                 ",
             ),
             password_policy=cognito.PasswordPolicy(
-                min_length=6,
+                min_length=8,
+                require_lowercase=True,
+                require_uppercase=True,
+                require_digits=True,
+                require_symbols=True,
                 temp_password_validity=Duration.days(7)
             )
         )
@@ -220,7 +276,8 @@ class JobPollerStack(Stack):
         # Cognito Identity Pool      
         admsIdentityPool = cognito.CfnIdentityPool(self, "ADMSIdentityPool",
             cognito_identity_providers=pool.identity_providers,
-            allow_unauthenticated_identities=True
+            # allow_unauthenticated_identities=True
+            allow_unauthenticated_identities=False
         )
         # Cognito Identity Pool Role
         identitypoolAuthAssumeRolePolicyDoc = iam.PolicyDocument(
@@ -283,9 +340,26 @@ class JobPollerStack(Stack):
         )
 
         # API Gateway
+        prd_log_group = logs.LogGroup(self, "adms-search-api-LogGroup")
         api = apigateway.RestApi(self, "search-api",
             description="ADMS Lambda search-api",
-            rest_api_name="adms-search-api"
+            rest_api_name="adms-search-api",
+            deploy_options=apigateway.StageOptions(
+                logging_level=apigateway.MethodLoggingLevel.INFO,
+                data_trace_enabled=True,
+                access_log_destination=apigateway.LogGroupLogDestination(prd_log_group),
+                access_log_format=apigateway.AccessLogFormat.json_with_standard_fields(
+                    caller=False,
+                    http_method=True,
+                    ip=True,
+                    protocol=True,
+                    request_time=True,
+                    resource_path=True,
+                    response_length=True,
+                    status=True,
+                    user=True
+                )
+            )
         )
         # API Gateway Authorizer
         apiAuth = apigateway.CognitoUserPoolsAuthorizer(self, "apiAuth",
@@ -293,22 +367,54 @@ class JobPollerStack(Stack):
         )
         # API Gateway Method
         resource = api.root.add_resource("search")
-        api.root.add_method("GET", apigateway.LambdaIntegration(search_api, proxy=True),
+        api.root.add_method("GET", apigateway.LambdaIntegration(
+            search_api, 
+            proxy=True,
+            integration_responses=[apigateway.IntegrationResponse(
+                    # Successful response from the Lambda function, no filter defined
+                    #  - the selectionPattern filter only tests the error message
+                    # We will set the response status code to 200
+                    status_code="200",
+                    response_parameters={
+                        # We can map response parameters
+                        # - Destination parameters (the key) are the response parameters (used in mappings)
+                        # - Source parameters (the value) are the integration response parameters or expressions
+                        "method.response.header.Content-Type": "'application/json'",
+                        "method.response.header.Access-Control-Allow-Origin": "'*'",
+                        "method.response.header.Access-Control-Allow-Credentials": "'true'"
+                    }
+                )]
+            ),
             request_parameters={"method.request.querystring.q":True},
             authorizer=apiAuth,
             authorization_type=apigateway.AuthorizationType.COGNITO,
             authorization_scopes=["email", "aws.cognito.signin.user.admin"],
             method_responses=[apigateway.MethodResponse(
                 status_code="200",
-
-                # the properties below are optional
-                response_models={
-                    "application/json": apigateway.Model.EMPTY_MODEL
-                },
+                # response_models={
+                #     "application/json": apigateway.Model.EMPTY_MODEL
+                # },
                 response_parameters={
-                    "method.response.header.Access-Control-Allow-Origin": True
+                    "method.response.header.Content-Type": True,
+                    "method.response.header.Access-Control-Allow-Origin": True,
+                    "method.response.header.Access-Control-Allow-Credentials": True
                 }
-            )]
+            ),apigateway.MethodResponse(
+                status_code="400",
+                response_parameters={
+                    "method.response.header.Content-Type": True,
+                    "method.response.header.Access-Control-Allow-Origin": True,
+                    "method.response.header.Access-Control-Allow-Credentials": True
+                }
+                # response_models={
+                #     "application/json": apigateway.Model.EMPTY_MODEL
+                # }
+            )
+            ]
+        )
+        resource.add_cors_preflight(
+            allow_origins=["*"],
+            allow_methods=["GET", "PUT"]
         )
         # IAM Policy Document
         adms_policyDoc = iam.PolicyDocument(
@@ -317,18 +423,17 @@ class JobPollerStack(Stack):
                     actions=[
                         "logs:CreateLogGroup",
                         "logs:CreateLogStream",
-                        "logs:PutLogEvents"
+                        "logs:CreateLogDelivery",
+                        "logs:GetLogDelivery",
+                        "logs:UpdateLogDelivery",
+                        "logs:DeleteLogDelivery",
+                        "logs:ListLogDeliveries",
+                        "logs:PutLogEvents",
+                        "logs:PutResourcePolicy",
+                        "logs:DescribeResourcePolicies",
+                        "logs:DescribeLogGroups"
                     ],
-                    resources=["arn:aws:logs:*:*:*"]
-                ),
-                iam.PolicyStatement(
-                    actions=[
-                        "logs:CreateLogStream",
-                        "logs:PutLogEvents"
-                    ],
-                    resources=[
-                        "arn:aws:logs:*:*:log-group:/aws/lambda/*:*"
-                    ]
+                    resources=["*"]
                 ),
                 iam.PolicyStatement(
                     actions=[
@@ -368,8 +473,13 @@ class JobPollerStack(Stack):
                 ),
                 iam.PolicyStatement(
                     actions=[
-                        "es:ESHttp*"
-                    ],
+                                "es:ESHttpGet",
+                                "es:ESHttpHead",
+                                "es:ESHttpPut",
+                                "es:ESHttpDelete",
+                                "es:ESHttpPost",
+                                "es:ESHttpPatch"
+                            ],
                     resources=[
                         "*"
                     ]
@@ -422,7 +532,9 @@ class JobPollerStack(Stack):
 
         # Load step function template file
         sfn_def = open("../../step-function/StateMachineTemplate.json", "r")
-
+        
+        log_group = logs.LogGroup(self, "admsStateMachineLogGroup")
+        
         # Step Functions
         cfn_state_machine = _aws_stepfunctions.CfnStateMachine(self, "admsStateMachine",
             role_arn=state_machine_role.role_arn,
@@ -436,6 +548,15 @@ class JobPollerStack(Stack):
             },
             state_machine_name="admsStateMachine",
             state_machine_type="STANDARD",
+            logging_configuration=_aws_stepfunctions.CfnStateMachine.LoggingConfigurationProperty(
+                destinations=[_aws_stepfunctions.CfnStateMachine.LogDestinationProperty(
+                    cloud_watch_logs_log_group=_aws_stepfunctions.CfnStateMachine.CloudWatchLogsLogGroupProperty(
+                        log_group_arn=log_group.log_group_arn
+                    )
+                )],
+                include_execution_data=False,
+                level="ALL"
+            ),
             tracing_configuration=_aws_stepfunctions.CfnStateMachine.TracingConfigurationProperty(
                 enabled=True
             )
@@ -535,4 +656,35 @@ class JobPollerStack(Stack):
             policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
                 resources=cr.AwsCustomResourcePolicy.ANY_RESOURCE
             )
+        )
+        Aspects.of(self).add(AwsSolutionsChecks())
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-S1", "reason": "The S3 Bucket has server access logs disabled. (Central bucket server access log left disable)"}]
+        )
+        NagSuppressions.add_stack_suppressions(
+           self, [{"id": "AwsSolutions-OS4", "reason": "Not implemented."}]
+        )
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-COG3", "reason": "Not implemented due advanced security extra costs."}]
+        )
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-APIG4", "reason": "Added API authorization via CDK add_resource."}]
+        )
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-COG4", "reason": "Added in apiAuth = apigateway.CognitoUserPoolsAuthorizer."}]
+        )
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-L1", "reason": "CDK uses an older version of Node for custom resource provider."}]
+        )
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-APIG2", "reason": "Not implemented."}]
+        )
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-OS3", "reason": "Fix not available in L2 Construct when using VPC-bound cluster.'"}]
+        )
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-IAM4", "reason": "Using AWS managed policies."}]
+        )
+        NagSuppressions.add_stack_suppressions(
+            self, [{"id": "AwsSolutions-IAM5", "reason": "recursive objects (S3, transcribe, polly) and wildcards"}]
         )
