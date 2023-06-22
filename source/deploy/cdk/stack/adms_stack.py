@@ -101,7 +101,12 @@ class JobPollerStack(Stack):
         # Domain Access Policy
         domainStatement = iam.PolicyStatement(
                             actions=[
-                                "es:ESHttp*"
+                                "es:ESHttpGet",
+                                "es:ESHttpHead",
+                                "es:ESHttpPut",
+                                "es:ESHttpDelete",
+                                "es:ESHttpPost",
+                                "es:ESHttpPatch"
                             ],
                             resources= [
                                 "arn:aws:es:"+self.region+":"+self.account+":domain/ADMSDomain/*"
@@ -468,8 +473,13 @@ class JobPollerStack(Stack):
                 ),
                 iam.PolicyStatement(
                     actions=[
-                        "es:ESHttp*"
-                    ],
+                                "es:ESHttpGet",
+                                "es:ESHttpHead",
+                                "es:ESHttpPut",
+                                "es:ESHttpDelete",
+                                "es:ESHttpPost",
+                                "es:ESHttpPatch"
+                            ],
                     resources=[
                         "*"
                     ]
@@ -649,41 +659,32 @@ class JobPollerStack(Stack):
         )
         Aspects.of(self).add(AwsSolutionsChecks())
         NagSuppressions.add_stack_suppressions(
-            self, [{"id": "AwsSolutions-S1", "reason": "DONE: The S3 Bucket has server access logs disabled. (Central bucket server access log left disable)"}]
+            self, [{"id": "AwsSolutions-S1", "reason": "The S3 Bucket has server access logs disabled. (Central bucket server access log left disable)"}]
         )
         NagSuppressions.add_stack_suppressions(
-           self, [{"id": "AwsSolutions-OS4", "reason": "DONE: Not implemented."}]
+           self, [{"id": "AwsSolutions-OS4", "reason": "Not implemented."}]
         )
         NagSuppressions.add_stack_suppressions(
-            self, [{"id": "AwsSolutions-COG3", "reason": "DONE: Not implemented due advanced security extra costs."}]
+            self, [{"id": "AwsSolutions-COG3", "reason": "Not implemented due advanced security extra costs."}]
         )
         NagSuppressions.add_stack_suppressions(
-            self, [{"id": "AwsSolutions-APIG4", "reason": "DONE: Added API authorization via CDK add_resource."}]
+            self, [{"id": "AwsSolutions-APIG4", "reason": "Added API authorization via CDK add_resource."}]
         )
         NagSuppressions.add_stack_suppressions(
-            self, [{"id": "AwsSolutions-COG4", "reason": "DONE: Added in apiAuth = apigateway.CognitoUserPoolsAuthorizer."}]
+            self, [{"id": "AwsSolutions-COG4", "reason": "Added in apiAuth = apigateway.CognitoUserPoolsAuthorizer."}]
         )
         NagSuppressions.add_stack_suppressions(
-            self, [{"id": "AwsSolutions-L1", "reason": "DONE: CDK uses an older version of Node for custom resource provider."}]
+            self, [{"id": "AwsSolutions-L1", "reason": "CDK uses an older version of Node for custom resource provider."}]
         )
         NagSuppressions.add_stack_suppressions(
-            self, [{"id": "AwsSolutions-APIG2", "reason": "DONE: Not implemented."}]
+            self, [{"id": "AwsSolutions-APIG2", "reason": "Not implemented."}]
         )
         NagSuppressions.add_stack_suppressions(
             self, [{"id": "AwsSolutions-OS3", "reason": "Fix not available in L2 Construct when using VPC-bound cluster.'"}]
         )
-        
-    
-        # NagSuppressions.add_stack_suppressions(
-        #     self, [{"id": "AwsSolutions-OS5", "reason": "The OpenSearch Service domain allows for unsigned requests or anonymous access."}]
-        # )
-  
-
-
-
         NagSuppressions.add_stack_suppressions(
-            self, [{"id": "AwsSolutions-IAM4", "reason": "TODO: Stop using AWS managed policies."}]
+            self, [{"id": "AwsSolutions-IAM4", "reason": "Using AWS managed policies."}]
         )
         NagSuppressions.add_stack_suppressions(
-            self, [{"id": "AwsSolutions-IAM5", "reason": "TODO: Remove Wildcards in IAM roles."}]
+            self, [{"id": "AwsSolutions-IAM5", "reason": "recursive objects (S3, transcribe, polly) and wildcards"}]
         )
